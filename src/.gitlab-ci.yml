@@ -1,0 +1,17 @@
+stages:
+  - build
+
+# Используем DinD (Docker-in-Docker)
+build-backend:
+  stage: build
+  image: docker:24.0.5-cli
+  services:
+    - name: docker:24.0.5-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    # Просто вызываем твой скрипт
+    - chmod +x ./build-backend.sh
+    - ./build-backend.sh
