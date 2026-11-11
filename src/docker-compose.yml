@@ -1,14 +1,28 @@
 services:
   backend:
-    image: my-backend:latest
+    image: ${NEXUS_HOST}/${NEXUS_REPO_BACKEND}/my-backend:latest
     container_name: my_backend
+    restart: always
     ports:
-      - "8081:8081"
+      - "${BACKEND_PORT}:8081"
+    env_file:
+      - .env
+    networks:
+      - momo-network
 
   frontend:
-    image: my-frontend:latest
+    image: ${NEXUS_HOST}/${NEXUS_REPO_FRONTEND}/my-frontend:latest
     container_name: my_frontend
+    restart: always
     ports:
-      - "80:8080" # <-- ВОТ ЗДЕСЬ фронт проброшен на 80-й порт
+      - "${FRONTEND_PORT}:8080"
     depends_on:
       - backend
+    env_file:
+      - .env
+    networks:
+      - momo-network
+
+networks:
+  momo-network:
+    driver: bridge

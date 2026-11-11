@@ -1,23 +1,28 @@
 #!/bin/sh
-set -e # Остановить выполнение при ошибке
+set -e
 
-echo "=== Старт сборки бэкенда ==="
-
-# 1. Логин в GitLab Registry (используем встроенные переменные GitLab)
-if [ -n "$CI" ]; then
-  echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+# Загружаем переменные из .env
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a
+  . "$SCRIPT_DIR/.env"
+  set +a
 fi
 
-# 2. Сборка (проверь путь: если backend в src/, то ./src/backend)
-docker build -t my-backend:latest ./src/backend
+echo "=== [1/2] Сборка бэкенда ==="
+docker build -t my-backend:latest "$SCRIPT_DIR/backend"
 
-# 3. Пуш в Registry (только если мы в CI)
-if [ -n "$CI" ]; then
-  docker tag my-backend:latest "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA"
-  docker tag my-backend:latest "$CI_REGISTRY_IMAGE/backend:latest"
+if [ -n "$NEXUS_HOST" ]; then
+  echo "=== [2/2] Пуш бэкенда в Nexus ==="
+  IMAGE_NAME="${NEXUS_HOST}/${NEXUS_REPO_BACKEND}/my-backend:latest"
   
-  docker push "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA"
-  docker push "$CI_REGISTRY_IMAGE/backend:latest"
+  docker tag my-backend:latest "$IMAGE_NAME"
+  
+  printf '%s' "$NEXUS_PASS" | docker login -u "$NEXUS_USER" --password-stdin "$NEXUS_HOST"
+  docker push "$IMAGE_NAME"
+else
+  echo "ОШИБКА: Переменная NEXUS_HOST не найдена в .env!"
+  exit 1
 fi
 
-echo "=== Сборка завершена ==="
+echo "=== Бэкенд успешно собран и запушен ==="
