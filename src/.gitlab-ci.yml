@@ -1,17 +1,32 @@
-stages:
-  - build
+name: build
 
-# Используем DinD (Docker-in-Docker)
-build-backend:
-  stage: build
-  image: docker:24.0.5-cli
-  services:
-    - name: docker:24.0.5-dind
-      alias: docker
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-  script:
-    # Просто вызываем твой скрипт
-    - chmod +x ./build-backend.sh
-    - ./build-backend.sh
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-backend:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_API_VERSION: "1.44"
+      NEXUS_USER: ${{ secrets.NEXUS_USER }}
+      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+      NEXUS_REPO_BACKEND: ${{ secrets.NEXUS_REPO_BACKEND }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure insecure registry
+        run: |
+          echo '{ "insecure-registries": ["153.51.118.157:8081"] }' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+
+      - name: Ensure .env exists
+        run: touch .env
+
+      - name: Build backend
+        run: |
+          chmod +x ./build-backend.sh
+          bash ./build-backend.sh
