@@ -1,0 +1,28 @@
+services:
+  backend:
+    image: ${NEXUS_HOST}/${NEXUS_REPO_BACKEND}/my-backend:latest
+    container_name: my_backend
+    restart: always
+    ports:
+      - "${BACKEND_PORT}:8081"
+    env_file:
+      - .env
+    networks:
+      - momo-network
+
+  frontend:
+    image: ${NEXUS_HOST}/${NEXUS_REPO_FRONTEND}/my-frontend:latest
+    container_name: my_frontend
+    restart: always
+    ports:
+      - "${FRONTEND_PORT}:8080"
+    depends_on:
+      - backend
+    env_file:
+      - .env
+    networks:
+      - momo-network
+
+networks:
+  momo-network:
+    driver: bridge
