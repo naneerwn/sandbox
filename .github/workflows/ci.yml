@@ -7,31 +7,57 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build:
+  build-backend:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        component: [backend, frontend]
-    
-    # Указываем, что все шаги (run) должны выполняться внутри папки src
-    defaults:
-      run:
-        working-directory: ./src
-
     env:
+      DOCKER_API_VERSION: "1.44"
       NEXUS_USER: ${{ secrets.NEXUS_USER }}
       NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
       NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
       NEXUS_REPO_BACKEND: ${{ secrets.NEXUS_REPO_BACKEND }}
-      NEXUS_REPO_FRONTEND: ${{ secrets.NEXUS_REPO_FRONTEND }}
-      DOCKER_API_VERSION: "1.44"
-
+      BACKEND_PORT: ${{ secrets.BACKEND_PORT }}
+      FRONTEND_PORT: ${{ secrets.FRONTEND_PORT }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run build script for ${{ matrix.component }}
+      - name: Configure insecure registry
         run: |
-          touch .env  # Теперь .env создастся внутри папки src
-          chmod +x ./build-${{ matrix.component }}.sh
-          ./build-${{ matrix.component }}.sh
+          echo "{ \"insecure-registries\": [\"$NEXUS_HOST\"] }" | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+      - name: Ensure .env exists
+        working-directory: src
+        run: touch .env
+
+      - name: Build backend
+        working-directory: src
+        run: |
+          chmod +x ./build-backend.sh
+          bash ./build-backend.sh
+  build-frontend:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_API_VERSION: "1.44"
+      NEXUS_USER: ${{ secrets.NEXUS_USER }}
+      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+      NEXUS_REPO_FRONTEND: ${{ secrets.NEXUS_REPO_FRONTEND }}
+      BACKEND_PORT: ${{ secrets.BACKEND_PORT }}
+      FRONTEND_PORT: ${{ secrets.FRONTEND_PORT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure insecure registry
+        run: |
+          echo "{ \"insecure-registries\": [\"$NEXUS_HOST\"] }" | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+      - name: Ensure .env exists
+        working-directory: src
+        run: touch .env
+
+      - name: Build frontend
+        working-directory: src
+        run: |
+          chmod +x ./build-frontend.sh
+          bash ./build-frontend.sh
