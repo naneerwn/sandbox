@@ -10,12 +10,18 @@ on:
         required: false
         type: string
 
+# 1. Ограничение прав
 permissions:
   contents: read
   packages: write
 
+# 2. Отмена устаревших сборок при новом пуше
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # 1. ДЖОБА ВЕРСИИ
+  # 3. ДЖОБА ВЕРСИИ
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -30,9 +36,41 @@ jobs:
             echo "version=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
           fi
 
-  # 2. СБОРКА И ПУШ В ДВА РЕЕСТРА
-  build:
+  # 4. МОДУЛЬНЫЕ ТЕСТЫ
+  test:
     needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Run Go tests and generate reports
+        working-directory: src/backend
+        run: |
+          mkdir -p ${{ github.workspace }}/reports
+          set -e
+          go install github.com/jstemmer/go-junit-report/v2@v2.1.0
+          set +e
+          CGO_ENABLED=0 go test -v -coverprofile=${{ github.workspace }}/reports/coverage.out ./... > ${{ github.workspace }}/reports/test.log 2>&1
+          rc=$?
+          set -e
+          "$(go env GOPATH)/bin/go-junit-report" < ${{ github.workspace }}/reports/test.log > ${{ github.workspace }}/reports/junit.xml
+          [ -f ${{ github.workspace }}/reports/coverage.out ] && go tool cover -func=${{ github.workspace }}/reports/coverage.out > ${{ github.workspace }}/reports/coverage.txt || true
+          exit $rc
+
+      - name: Upload Test Reports
+        uses: actions/upload-artifact@v4
+        if: always() # Загружаем отчеты, даже если тесты упали
+        with:
+          name: test-reports
+          path: ${{ github.workspace }}/reports/
+
+  # 5. СБОРКА И ПУШ
+  build:
+    needs: [version, test] # Сборка ждет тесты
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -42,13 +80,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Настройка системного Docker (на всякий случай)
       - name: Configure Docker for insecure registry
         run: |
           echo "{ \"insecure-registries\": [\"${{ secrets.NEXUS_HOST }}\"] }" | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
 
-      # 👇 ВОТ ЗДЕСЬ ГЛАВНОЕ ИСПРАВЛЕНИЕ ДЛЯ BUILDX
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
@@ -93,11 +129,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 3. ДЕПЛОЙ
+  # 6. ДЕПЛОЙ
   deploy:
-    needs: [version, build]
+    needs: [version, test, build]
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    environment: production
+    
+    # 7. Запрет параллельных деплоев
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+      
     steps:
       - uses: actions/checkout@v4
 
@@ -129,13 +172,7 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             cd ~/app
-            
-            # Логин в Nexus
             echo "${{ secrets.NEXUS_PASS }}" | docker login -u "${{ secrets.NEXUS_USER }}" --password-stdin "${{ secrets.NEXUS_HOST }}"
-            
-            # Скачиваем нужную версию и перезапускаем
             docker compose pull
             docker compose up -d --remove-orphans --force-recreate
-            
-            # Очистка старых образов
             docker image prune -f
