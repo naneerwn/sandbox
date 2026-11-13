@@ -31,6 +31,11 @@ jobs:
           echo '{"insecure-registries":["${{ secrets.NEXUS_HOST }}"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
 
+      # Создаем пустой .env, чтобы скрипт не падал при его отсутствии
+      - name: Ensure .env exists
+        working-directory: src
+        run: touch .env
+
       - name: Build and Push
         working-directory: src
         env:
@@ -64,6 +69,11 @@ jobs:
         run: |
           echo '{"insecure-registries":["${{ secrets.NEXUS_HOST }}"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
+
+      # Создаем пустой .env, чтобы скрипт не падал при его отсутствии
+      - name: Ensure .env exists
+        working-directory: src
+        run: touch .env
 
       - name: Build and Push
         working-directory: src
