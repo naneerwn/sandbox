@@ -2,126 +2,115 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "**" ]
+  workflow_dispatch:
+    inputs:
+      VERSION:
+        description: "Версия для отката. Пусто — собрать новую."
+        required: false
+        type: string
 
-# Разрешаем пушить образы в GHCR (GitHub Container Registry)
 permissions:
   contents: read
   packages: write
 
 jobs:
-  # --- 1. ТЕСТЫ БЭКЕНДА ---
-  test-backend:
+  # 1. ДЖОБА ВЕРСИИ
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Generate VERSION
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.VERSION }}" ]; then
+            echo "version=${{ github.event.inputs.VERSION }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          fi
+
+  # 2. СБОРКА И ПУШ В ДВА РЕЕСТРА
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    env:
+      # Выбираем нужный репозиторий из твоих секретов в зависимости от компонента
+      REPO_NAME: ${{ matrix.component == 'backend' && secrets.NEXUS_REPO_BACKEND || secrets.NEXUS_REPO_FRONTEND }}
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Go for tests
-        uses: actions/setup-go@v5
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          go-version: '1.22' # Сверь с версией в твоем go.mod
-          
-      - name: Run Tests
-        working-directory: src/backend
-        run: go test ./...
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-  # --- 2. СБОРКА И ПУШ БЭКЕНДА ---
-  build-backend:
-    needs: test-backend # Запустится только если тесты пройдут
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      # Разрешаем Docker работать с Nexus по HTTP (без HTTPS)
-      - name: Configure Docker
-        run: |
-          echo '{"insecure-registries":["${{ secrets.NEXUS_HOST }}"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
+      - name: Login to Nexus
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.NEXUS_HOST }}
+          username: ${{ secrets.NEXUS_USER }}
+          password: ${{ secrets.NEXUS_PASS }}
 
-      # Создаем пустой .env, чтобы скрипт сборки не упал с ошибкой
-      - name: Ensure .env exists
-        working-directory: src
-        run: touch .env
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/sandbox-${{ matrix.component }}
+            ${{ secrets.NEXUS_HOST }}/${{ env.REPO_NAME }}/sandbox-${{ matrix.component }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build and Push
-        working-directory: src
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_USER }}
-          NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-          NEXUS_REPO_BACKEND: ${{ secrets.NEXUS_REPO_BACKEND }}
-        run: |
-          chmod +x ./build-backend.sh
-          bash ./build-backend.sh
-          
-          # Логин в GHCR
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          
-          # Тегируем образ для GHCR и Nexus (с версией SHA и latest)
-          docker tag my-backend:latest ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
-          docker tag my-backend:latest ghcr.io/${{ github.repository }}/backend:latest
-          docker tag my-backend:latest ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_BACKEND }}/my-backend:${{ github.sha }}
-          
-          # Пушим образы
-          docker push ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
-          docker push ghcr.io/${{ github.repository }}/backend:latest
-          docker push ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_BACKEND }}/my-backend:${{ github.sha }}
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src/${{ matrix.component }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-  # --- 3. СБОРКА И ПУШ ФРОНТЕНДА ---
-  build-frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure Docker
-        run: |
-          echo '{"insecure-registries":["${{ secrets.NEXUS_HOST }}"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-
-      - name: Ensure .env exists
-        working-directory: src
-        run: touch .env
-
-      - name: Build and Push
-        working-directory: src
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_USER }}
-          NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
-          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-          NEXUS_REPO_FRONTEND: ${{ secrets.NEXUS_REPO_FRONTEND }}
-        run: |
-          chmod +x ./build-frontend.sh
-          bash ./build-frontend.sh
-          
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          
-          docker tag my-frontend:latest ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
-          docker tag my-frontend:latest ghcr.io/${{ github.repository }}/frontend:latest
-          docker tag my-frontend:latest ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_FRONTEND }}/my-frontend:${{ github.sha }}
-          
-          docker push ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
-          docker push ghcr.io/${{ github.repository }}/frontend:latest
-          docker push ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_FRONTEND }}/my-frontend:${{ github.sha }}
-
-  # --- 4. ДЕПЛОЙ НА СЕРВЕР ---
+  # 3. ДЕПЛОЙ
   deploy:
-    needs: [build-backend, build-frontend]
+    needs: [version, build]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Копируем docker-compose.yml на сервер в папку ~/app
-      - name: Copy compose file to server
+      # Создаем .env из твоих секретов
+      - name: Prepare .env
+        run: |
+          echo "NEXUS_HOST=${{ secrets.NEXUS_HOST }}" > .env
+          echo "NEXUS_REPO_BACKEND=${{ secrets.NEXUS_REPO_BACKEND }}" >> .env
+          echo "NEXUS_REPO_FRONTEND=${{ secrets.NEXUS_REPO_FRONTEND }}" >> .env
+          echo "BACKEND_PORT=${{ secrets.BACKEND_PORT }}" >> .env
+          echo "FRONTEND_PORT=${{ secrets.FRONTEND_PORT }}" >> .env
+          echo "IMAGE_REGISTRY=${{ secrets.NEXUS_HOST }}" >> .env
+          echo "IMAGE_TAG=${{ needs.version.outputs.version }}" >> .env
+
+      - name: Copy files to VM
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "src/docker-compose.yml"
+          source: "src/docker-compose.yml,.env"
           target: "~/app/"
           strip_components: 1
 
-      # Подключаемся по SSH и перезапускаем контейнеры
       - name: Deploy via SSH
         uses: appleboy/ssh-action@master
         with:
@@ -131,22 +120,12 @@ jobs:
           script: |
             cd ~/app
             
-            # Создаем .env для compose с переменными портами
-            echo "NEXUS_HOST=${{ secrets.NEXUS_HOST }}" > .env
-            echo "NEXUS_REPO_BACKEND=${{ secrets.NEXUS_REPO_BACKEND }}" >> .env
-            echo "NEXUS_REPO_FRONTEND=${{ secrets.NEXUS_REPO_FRONTEND }}" >> .env
-            echo "BACKEND_PORT=8081" >> .env
-            echo "FRONTEND_PORT=80" >> .env
-            
             # Логин в Nexus
             echo "${{ secrets.NEXUS_PASS }}" | docker login -u "${{ secrets.NEXUS_USER }}" --password-stdin "${{ secrets.NEXUS_HOST }}"
             
-            # 1. ЖЕСТКОЕ УДАЛЕНИЕ старых контейнеров (игнорируем ошибку, если их нет)
-            docker rm -f my_backend my_frontend || true
-            
-            # 2. Остановка текущего проекта compose
-            docker compose down --remove-orphans || true
-            
-            # 3. Скачиваем свежие образы и запускаем
+            # Скачиваем нужную версию и перезапускаем
             docker compose pull
-            docker compose up -d
+            docker compose up -d --remove-orphans --force-recreate
+            
+            # Очистка старых образов
+            docker image prune -f
