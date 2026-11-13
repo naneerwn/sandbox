@@ -1,63 +1,121 @@
-name: build
+name: CI/CD Pipeline
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+
+# Разрешаем пушить образы в GHCR
+permissions:
+  contents: read
+  packages: write
 
 jobs:
+  # --- СБОРКА БЭКЕНДА ---
   build-backend:
     runs-on: ubuntu-latest
-    env:
-      DOCKER_API_VERSION: "1.44"
-      NEXUS_USER: ${{ secrets.NEXUS_USER }}
-      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
-      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-      NEXUS_REPO_BACKEND: ${{ secrets.NEXUS_REPO_BACKEND }}
-      BACKEND_PORT: ${{ secrets.BACKEND_PORT }}
-      FRONTEND_PORT: ${{ secrets.FRONTEND_PORT }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      
+      - name: Setup Go for tests
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          
+      - name: Run Tests
+        working-directory: src/backend
+        run: go test ./...
 
-      - name: Configure insecure registry
+      # Настройка Docker для Nexus (HTTP)
+      - name: Configure Docker
         run: |
-          echo "{ \"insecure-registries\": [\"$NEXUS_HOST\"] }" | sudo tee /etc/docker/daemon.json
+          echo '{"insecure-registries":["${{ secrets.NEXUS_HOST }}"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-      - name: Ensure .env exists
-        working-directory: src
-        run: touch .env
 
-      - name: Build backend
+      - name: Build and Push
         working-directory: src
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_USER }}
+          NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+          NEXUS_REPO_BACKEND: ${{ secrets.NEXUS_REPO_BACKEND }}
         run: |
           chmod +x ./build-backend.sh
           bash ./build-backend.sh
+          
+          # Логин в GHCR
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          
+          # Тегируем и пушим в GHCR и Nexus (с версией SHA)
+          docker tag my-backend:latest ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
+          docker tag my-backend:latest ghcr.io/${{ github.repository }}/backend:latest
+          docker tag my-backend:latest ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_BACKEND }}/my-backend:${{ github.sha }}
+          
+          docker push ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
+          docker push ghcr.io/${{ github.repository }}/backend:latest
+          docker push ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_BACKEND }}/my-backend:${{ github.sha }}
+
+  # --- СБОРКА ФРОНТЕНДА ---
   build-frontend:
     runs-on: ubuntu-latest
-    env:
-      DOCKER_API_VERSION: "1.44"
-      NEXUS_USER: ${{ secrets.NEXUS_USER }}
-      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
-      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-      NEXUS_REPO_FRONTEND: ${{ secrets.NEXUS_REPO_FRONTEND }}
-      BACKEND_PORT: ${{ secrets.BACKEND_PORT }}
-      FRONTEND_PORT: ${{ secrets.FRONTEND_PORT }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure insecure registry
+      - name: Configure Docker
         run: |
-          echo "{ \"insecure-registries\": [\"$NEXUS_HOST\"] }" | sudo tee /etc/docker/daemon.json
+          echo '{"insecure-registries":["${{ secrets.NEXUS_HOST }}"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-      - name: Ensure .env exists
-        working-directory: src
-        run: touch .env
 
-      - name: Build frontend
+      - name: Build and Push
         working-directory: src
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_USER }}
+          NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+          NEXUS_REPO_FRONTEND: ${{ secrets.NEXUS_REPO_FRONTEND }}
         run: |
           chmod +x ./build-frontend.sh
           bash ./build-frontend.sh
+          
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          
+          docker tag my-frontend:latest ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
+          docker tag my-frontend:latest ghcr.io/${{ github.repository }}/frontend:latest
+          docker tag my-frontend:latest ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_FRONTEND }}/my-frontend:${{ github.sha }}
+          
+          docker push ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
+          docker push ghcr.io/${{ github.repository }}/frontend:latest
+          docker push ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_FRONTEND }}/my-frontend:${{ github.sha }}
+
+  # --- ДЕПЛОЙ ---
+  deploy:
+    needs: [build-backend, build-frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy compose file to server
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "src/docker-compose.yml"
+          target: "~/app/"
+          strip_components: 1
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd ~/app
+            # Создаем .env для compose
+            echo "NEXUS_HOST=${{ secrets.NEXUS_HOST }}" > .env
+            echo "NEXUS_REPO_BACKEND=${{ secrets.NEXUS_REPO_BACKEND }}" >> .env
+            echo "NEXUS_REPO_FRONTEND=${{ secrets.NEXUS_REPO_FRONTEND }}" >> .env
+            
+            echo "${{ secrets.NEXUS_PASS }}" | docker login -u "${{ secrets.NEXUS_USER }}" --password-stdin "${{ secrets.NEXUS_HOST }}"
+            docker compose pull
+            docker compose up -d
