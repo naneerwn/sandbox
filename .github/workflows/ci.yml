@@ -7,46 +7,26 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-backend:
+  build:
     runs-on: ubuntu-latest
-    container:
-      image: docker:24.0.5-cli
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    
     env:
-      DOCKER_API_VERSION: "1.44"
       NEXUS_USER: ${{ secrets.NEXUS_USER }}
       NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
       NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
       NEXUS_REPO_BACKEND: ${{ secrets.NEXUS_REPO_BACKEND }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Ensure .env exists
-        run: touch .env
-
-      - name: Build backend
-        run: |
-          chmod +x ./build-backend.sh
-          sh ./build-backend.sh
-
-  build-frontend:
-    runs-on: ubuntu-latest
-    container:
-      image: docker:24.0.5-cli
-    env:
-      DOCKER_API_VERSION: "1.44"
-      NEXUS_USER: ${{ secrets.NEXUS_USER }}
-      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
-      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
       NEXUS_REPO_FRONTEND: ${{ secrets.NEXUS_REPO_FRONTEND }}
+      DOCKER_API_VERSION: "1.44"
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Ensure .env exists
-        run: touch .env
-
-      - name: Build frontend
+      - name: Run build script for ${{ matrix.component }}
         run: |
-          chmod +x ./build-frontend.sh
-          sh ./build-frontend.sh
+          touch .env  # На всякий случай создаем пустой .env
+          chmod +x ./build-${{ matrix.component }}.sh
+          ./build-${{ matrix.component }}.sh
