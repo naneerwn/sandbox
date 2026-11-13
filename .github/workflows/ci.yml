@@ -4,13 +4,13 @@ on:
   push:
     branches: [ main, master ]
 
-# Разрешаем пушить образы в GHCR
+# Разрешаем пушить образы в GHCR (GitHub Container Registry)
 permissions:
   contents: read
   packages: write
 
 jobs:
-  # --- ТЕСТЫ БЭКЕНДА ---
+  # --- 1. ТЕСТЫ БЭКЕНДА ---
   test-backend:
     runs-on: ubuntu-latest
     steps:
@@ -19,26 +19,26 @@ jobs:
       - name: Setup Go for tests
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.22' # Сверь с версией в твоем go.mod
           
       - name: Run Tests
         working-directory: src/backend
         run: go test ./...
 
-  # --- СБОРКА И ПУШ БЭКЕНДА ---
+  # --- 2. СБОРКА И ПУШ БЭКЕНДА ---
   build-backend:
-    needs: test-backend
+    needs: test-backend # Запустится только если тесты пройдут
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       
-      # Настройка Docker для Nexus (HTTP) на раннере GitHub
+      # Разрешаем Docker работать с Nexus по HTTP (без HTTPS)
       - name: Configure Docker
         run: |
           echo '{"insecure-registries":["${{ secrets.NEXUS_HOST }}"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
 
-      # Создаем пустой .env, чтобы скрипт не падал
+      # Создаем пустой .env, чтобы скрипт сборки не упал с ошибкой
       - name: Ensure .env exists
         working-directory: src
         run: touch .env
@@ -57,16 +57,17 @@ jobs:
           # Логин в GHCR
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           
-          # Тегируем и пушим в GHCR и Nexus (с версией SHA)
+          # Тегируем образ для GHCR и Nexus (с версией SHA и latest)
           docker tag my-backend:latest ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
           docker tag my-backend:latest ghcr.io/${{ github.repository }}/backend:latest
           docker tag my-backend:latest ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_BACKEND }}/my-backend:${{ github.sha }}
           
+          # Пушим образы
           docker push ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
           docker push ghcr.io/${{ github.repository }}/backend:latest
           docker push ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_BACKEND }}/my-backend:${{ github.sha }}
 
-  # --- СБОРКА И ПУШ ФРОНТЕНДА ---
+  # --- 3. СБОРКА И ПУШ ФРОНТЕНДА ---
   build-frontend:
     runs-on: ubuntu-latest
     steps:
@@ -102,13 +103,14 @@ jobs:
           docker push ghcr.io/${{ github.repository }}/frontend:latest
           docker push ${{ secrets.NEXUS_HOST }}/${{ secrets.NEXUS_REPO_FRONTEND }}/my-frontend:${{ github.sha }}
 
-  # --- ДЕПЛОЙ НА СЕРВЕР ---
+  # --- 4. ДЕПЛОЙ НА СЕРВЕР ---
   deploy:
     needs: [build-backend, build-frontend]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Копируем docker-compose.yml на сервер в папку ~/app
       - name: Copy compose file to server
         uses: appleboy/scp-action@master
         with:
@@ -119,6 +121,7 @@ jobs:
           target: "~/app/"
           strip_components: 1
 
+      # Подключаемся по SSH и перезапускаем контейнеры
       - name: Deploy via SSH
         uses: appleboy/ssh-action@master
         with:
@@ -128,7 +131,7 @@ jobs:
           script: |
             cd ~/app
             
-            # Создаем .env для compose (с портами и репозиториями)
+            # Создаем .env для compose с переменными портами
             echo "NEXUS_HOST=${{ secrets.NEXUS_HOST }}" > .env
             echo "NEXUS_REPO_BACKEND=${{ secrets.NEXUS_REPO_BACKEND }}" >> .env
             echo "NEXUS_REPO_FRONTEND=${{ secrets.NEXUS_REPO_FRONTEND }}" >> .env
@@ -138,9 +141,12 @@ jobs:
             # Логин в Nexus
             echo "${{ secrets.NEXUS_PASS }}" | docker login -u "${{ secrets.NEXUS_USER }}" --password-stdin "${{ secrets.NEXUS_HOST }}"
             
-            # Останавливаем старые контейнеры, чтобы избежать конфликта имен
-            docker compose down --remove-orphans
+            # 1. ЖЕСТКОЕ УДАЛЕНИЕ старых контейнеров (игнорируем ошибку, если их нет)
+            docker rm -f my_backend my_frontend || true
             
-            # Скачиваем новые образы и запускаем
+            # 2. Остановка текущего проекта compose
+            docker compose down --remove-orphans || true
+            
+            # 3. Скачиваем свежие образы и запускаем
             docker compose pull
             docker compose up -d
