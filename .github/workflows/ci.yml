@@ -13,6 +13,11 @@ jobs:
       matrix:
         component: [backend, frontend]
     
+    # Указываем, что все шаги (run) должны выполняться внутри папки src
+    defaults:
+      run:
+        working-directory: ./src
+
     env:
       NEXUS_USER: ${{ secrets.NEXUS_USER }}
       NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
@@ -27,6 +32,6 @@ jobs:
 
       - name: Run build script for ${{ matrix.component }}
         run: |
-          touch .env  # На всякий случай создаем пустой .env
+          touch .env  # Теперь .env создастся внутри папки src
           chmod +x ./build-${{ matrix.component }}.sh
           ./build-${{ matrix.component }}.sh
