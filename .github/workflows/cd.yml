@@ -1,0 +1,37 @@
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия для деплоя'
+        required: true
+        default: 'latest'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          cat << 'EOF' > ~/.kube/config
+          ${{ secrets.KUBE_CONFIG }}
+          EOF
+          chmod 600 ~/.kube/config
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install sandbox ./helm/sandbox \
+            --namespace sandbox \
+            --create-namespace \
+            --set version="${{ github.event.inputs.version }}"

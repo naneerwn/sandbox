@@ -1,0 +1,26 @@
+version: "latest"
+
+backend:
+  repository: ghcr.io/naneerwn/sandbox-backend
+  replicas: 1
+  port: 8081
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+frontend:
+  repository: ghcr.io/naneerwn/sandbox-frontend
+  replicas: 1
+  port: 8080
+  nodePort: 30080
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: sandbox
+description: Helm chart for sandbox backend and frontend
+version: 0.1.0
+appVersion: "1.0.0"
