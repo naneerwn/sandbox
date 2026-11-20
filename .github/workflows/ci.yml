@@ -1,13 +1,13 @@
-name: CI/CD Pipeline
+name: CI Pipeline
 
 on:
   push:
     branches: [ "**" ]
-  workflow_dispatch:
-    inputs:
-      VERSION:
-        required: false
-        type: string
+  # workflow_dispatch:
+  #   inputs:
+  #     VERSION:
+  #       required: false
+  #       type: string
 
 permissions:
   contents: read
@@ -36,7 +36,7 @@ jobs:
   # 2. МОДУЛЬНЫЕ ТЕСТЫ
   test:
     needs: version
-    if: github.event.inputs.VERSION == ''
+    # if: github.event.inputs.VERSION == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +70,7 @@ jobs:
   # 3. СБОРКА И ПУШ В ОБА REGISTRY
   build:
     needs: [version, test]
-    if: github.event.inputs.VERSION == ''
+    # if: github.event.inputs.VERSION == ''
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -129,50 +129,50 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 4. ДЕПЛОЙ В KUBERNETES
-  deploy:
-    needs: [version, build]
-    if: |
-      always() &&
-      needs.version.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-      (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
-      
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Copy K8s manifest to VM
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "k8s/app.yaml"
-          target: "~/k8s/"
-          strip_components: 1
-
-      - name: Deploy to MicroK8s via SSH
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            mkdir -p ~/k8s
-            cd ~/k8s
-            
-            echo "VERSION=${{ needs.version.outputs.version }}" > version
-            
-            microk8s kubectl apply -f app.yaml
-            
-            microk8s kubectl set image deployment/backend backend=ghcr.io/${{ github.repository_owner }}/sandbox-backend:${{ needs.version.outputs.version }} -n sandbox
-            microk8s kubectl set image deployment/frontend frontend=ghcr.io/${{ github.repository_owner }}/sandbox-frontend:${{ needs.version.outputs.version }} -n sandbox
-            
-            microk8s kubectl rollout status deployment/backend -n sandbox --timeout=90s
-            microk8s kubectl rollout status deployment/frontend -n sandbox --timeout=90s
-            
-            curl -f -s -o /dev/null --retry 5 --retry-delay 2 http://localhost
+  # 4. ДЕПЛОЙ В KUBERNETES (перенесён в отдельный пайплайн cd.yml)
+  # deploy:
+  #   needs: [version, build]
+  #   if: |
+  #     always() &&
+  #     needs.version.result == 'success' &&
+  #     (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+  #     (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+  #   runs-on: ubuntu-latest
+  #   concurrency:
+  #     group: deploy-production
+  #     cancel-in-progress: false
+  #     
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Copy K8s manifest to VM
+  #       uses: appleboy/scp-action@master
+  #       with:
+  #         host: ${{ secrets.DEPLOY_HOST }}
+  #         username: ${{ secrets.DEPLOY_USER }}
+  #         key: ${{ secrets.DEPLOY_SSH_KEY }}
+  #         source: "k8s/app.yaml"
+  #         target: "~/k8s/"
+  #         strip_components: 1
+  #
+  #     - name: Deploy to MicroK8s via SSH
+  #       uses: appleboy/ssh-action@master
+  #       with:
+  #         host: ${{ secrets.DEPLOY_HOST }}
+  #         username: ${{ secrets.DEPLOY_USER }}
+  #         key: ${{ secrets.DEPLOY_SSH_KEY }}
+  #         script: |
+  #           mkdir -p ~/k8s
+  #           cd ~/k8s
+  #           
+  #           echo "VERSION=${{ needs.version.outputs.version }}" > version
+  #           
+  #           microk8s kubectl apply -f app.yaml
+  #           
+  #           microk8s kubectl set image deployment/backend backend=ghcr.io/${{ github.repository_owner }}/sandbox-backend:${{ needs.version.outputs.version }} -n sandbox
+  #           microk8s kubectl set image deployment/frontend frontend=ghcr.io/${{ github.repository_owner }}/sandbox-frontend:${{ needs.version.outputs.version }} -n sandbox
+  #           
+  #           microk8s kubectl rollout status deployment/backend -n sandbox --timeout=90s
+  #           microk8s kubectl rollout status deployment/frontend -n sandbox --timeout=90s
+  #           
+  #           curl -f -s -o /dev/null --retry 5 --retry-delay 2 http://localhost
