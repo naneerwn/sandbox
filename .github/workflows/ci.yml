@@ -1,52 +1,178 @@
-name: build
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    branches: [ "**" ]
+  workflow_dispatch:
+    inputs:
+      VERSION:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-backend:
+  # 1. ДЖОБА ВЕРСИИ
+  version:
     runs-on: ubuntu-latest
-    container:
-      image: docker:24.0.5-cli
-    env:
-      DOCKER_API_VERSION: "1.44"
-      NEXUS_USER: ${{ secrets.NEXUS_USER }}
-      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
-      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-      NEXUS_REPO_BACKEND: ${{ secrets.NEXUS_REPO_BACKEND }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Ensure .env exists
-        run: touch .env
-
-      - name: Build backend
+      - name: Generate VERSION
+        id: version
         run: |
-          chmod +x ./build-backend.sh
-          sh ./build-backend.sh
+          if [ -n "${{ github.event.inputs.VERSION }}" ]; then
+            echo "version=${{ github.event.inputs.VERSION }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          fi
 
-  build-frontend:
+  # 2. МОДУЛЬНЫЕ ТЕСТЫ
+  test:
+    needs: version
+    if: github.event.inputs.VERSION == ''
     runs-on: ubuntu-latest
-    container:
-      image: docker:24.0.5-cli
-    env:
-      DOCKER_API_VERSION: "1.44"
-      NEXUS_USER: ${{ secrets.NEXUS_USER }}
-      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
-      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
-      NEXUS_REPO_FRONTEND: ${{ secrets.NEXUS_REPO_FRONTEND }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Ensure .env exists
-        run: touch .env
-
-      - name: Build frontend
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Run Go tests and generate reports
+        working-directory: src/backend
         run: |
-          chmod +x ./build-frontend.sh
-          sh ./build-frontend.sh
+          mkdir -p ${{ github.workspace }}/reports
+          set -e
+          # ИСПРАВЛЕНО: правильный путь к пакету
+          go install github.com/jstemmer/go-junit-report/v2@v2.1.0
+          set +e
+          CGO_ENABLED=0 go test -v -coverprofile=${{ github.workspace }}/reports/coverage.out ./... > ${{ github.workspace }}/reports/test.log 2>&1
+          rc=$?
+          set -e
+          "$(go env GOPATH)/bin/go-junit-report" < ${{ github.workspace }}/reports/test.log > ${{ github.workspace }}/reports/junit.xml
+          [ -f ${{ github.workspace }}/reports/coverage.out ] && go tool cover -func=${{ github.workspace }}/reports/coverage.out > ${{ github.workspace }}/reports/coverage.txt || true
+          exit $rc
+
+      - name: Upload Test Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: ${{ github.workspace }}/reports/
+
+  # 3. СБОРКА И ПУШ В ОБА REGISTRY
+  build:
+    needs: [version, test]
+    if: github.event.inputs.VERSION == ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    env:
+      REPO_NAME: ${{ matrix.component == 'backend' && secrets.NEXUS_REPO_BACKEND || secrets.NEXUS_REPO_FRONTEND }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Docker for insecure registry
+        run: |
+          echo "{ \"insecure-registries\": [\"${{ secrets.NEXUS_HOST }}\"] }" | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          config-inline: |
+            [registry."${{ secrets.NEXUS_HOST }}"]
+              http = true
+              insecure = true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Nexus
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.NEXUS_HOST }}
+          username: ${{ secrets.NEXUS_USER }}
+          password: ${{ secrets.NEXUS_PASS }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/sandbox-${{ matrix.component }}
+            ${{ secrets.NEXUS_HOST }}/${{ env.REPO_NAME }}/sandbox-${{ matrix.component }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src/${{ matrix.component }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 4. ДЕПЛОЙ В KUBERNETES
+  deploy:
+    needs: [version, build]
+    if: |
+      always() &&
+      needs.version.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+      
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy K8s manifest to VM
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "k8s/app.yaml"
+          target: "~/k8s/"
+          strip_components: 1
+
+      - name: Deploy to MicroK8s via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            mkdir -p ~/k8s
+            cd ~/k8s
+            
+            echo "VERSION=${{ needs.version.outputs.version }}" > version
+            
+            microk8s kubectl apply -f app.yaml
+            
+            microk8s kubectl set image deployment/backend backend=ghcr.io/${{ github.repository_owner }}/sandbox-backend:${{ needs.version.outputs.version }} -n sandbox
+            microk8s kubectl set image deployment/frontend frontend=ghcr.io/${{ github.repository_owner }}/sandbox-frontend:${{ needs.version.outputs.version }} -n sandbox
+            
+            microk8s kubectl rollout status deployment/backend -n sandbox --timeout=90s
+            microk8s kubectl rollout status deployment/frontend -n sandbox --timeout=90s
+            
+            curl -f -s -o /dev/null --retry 5 --retry-delay 2 http://localhost
