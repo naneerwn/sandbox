@@ -5,7 +5,7 @@ metadata:
   labels:
     app: sandbox-frontend
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: sandbox-frontend
   ports:
@@ -13,4 +13,3 @@ spec:
       port: 80
       targetPort: http
       protocol: TCP
-      nodePort: {{ .Values.frontend.nodePort }}

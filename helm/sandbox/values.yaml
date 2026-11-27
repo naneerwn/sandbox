@@ -34,3 +34,6 @@ frontend:
     limits:
       cpu: "500m"
       memory: "512Mi"
+
+domain: "kashirin.denisereda.ru"
+
