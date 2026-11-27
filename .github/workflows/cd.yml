@@ -2,8 +2,8 @@ name: CD
 
 on:
   push:
-    branches: [ "**" ] # <-- ДОБАВЛЕНО: запуск при пуше в любую ветку
-  workflow_dispatch:
+    branches: [ "**" ] # Запуск при пуше в любую ветку
+  workflow_dispatch:   # Ручной запуск для отката
     inputs:
       VERSION:
         description: 'Версия образа (например, latest, sha-62d60ed или 20261120-070148)'
@@ -91,11 +91,11 @@ jobs:
           mkdir -p "$HOME/.kube"
           chmod 700 "$HOME/.kube"
 
-          # Твой KUBE_CONFIG хранится сырым текстом, поэтому пишем его напрямую
+          # Записываем сырой kubeconfig
           printf '%s\n' "$KUBE_CONFIG" > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
 
-          # Исправляем путь к yc, чтобы kubectl мог авторизоваться
+          # Исправляем путь к yc для авторизации в кластере
           sed -i \
             's|command: /home/v-kash/yandex-cloud/bin/yc|command: yc|' \
             "$HOME/.kube/config"
