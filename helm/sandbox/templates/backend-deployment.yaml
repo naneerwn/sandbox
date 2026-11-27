@@ -5,7 +5,7 @@ metadata:
   labels:
     app: sandbox-backend
 spec:
-  replicas: {{ .Values.backend.replicas }}
+  replicas: {{ .Values.backend.replicas | default 1 }}
   selector:
     matchLabels:
       app: sandbox-backend
@@ -14,13 +14,20 @@ spec:
       labels:
         app: sandbox-backend
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
         - name: backend
           image: "{{ .Values.backend.repository }}:{{ .Values.version }}"
           imagePullPolicy: Always
           ports:
             - name: http
-              containerPort: {{ .Values.backend.port }}
+              containerPort: {{ .Values.backend.port | default 8081 }}
               protocol: TCP
+          env:
+            {{- range $key, $val := .Values.backend.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}

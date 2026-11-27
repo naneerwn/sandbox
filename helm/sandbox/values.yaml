@@ -1,8 +1,8 @@
 version: "latest"
 
 backend:
-  repository: ghcr.io/naneerwn/sandbox-backend
   replicas: 1
+  repository: ghcr.io/naneerwn/sandbox-backend
   port: 8081
   resources:
     requests:
@@ -11,6 +11,16 @@ backend:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  # Вот этот блок должен быть обязательно:
+  env:
+    DB_ENABLED: "true"
+    DB_HOST: "sandbox-db-postgresql"
+    DB_PORT: "5432"
+    DB_USER: "sandbox"
+    DB_PASSWORD: "sandbox_password"
+    DB_NAME: "sandbox_db"
+    DB_SSLMODE: "disable"
+    DATABASE_URL: "postgres://sandbox:sandbox_password@sandbox-db-postgresql:5432/sandbox_db?sslmode=disable"
 
 frontend:
   repository: ghcr.io/naneerwn/sandbox-frontend
