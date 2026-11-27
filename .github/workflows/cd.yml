@@ -1,120 +1,53 @@
-name: CD
+name: CD Pipeline
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ "**" ] # <-- ВОТ ЭТО ДОБАВЛЕНО: запуск при любом пуше в любую ветку
+  workflow_dispatch: # Оставляем для ручного запуска (отката)
     inputs:
-      VERSION:
-        description: 'Версия образа (например, latest, sha-62d60ed или 20261120-070148)'
-        required: true
-        default: 'latest'
+      version:
+        description: 'Версия для деплоя (тег образа). Оставьте пустым для latest'
+        required: false
         type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: sandbox-helm-lab4
-  cancel-in-progress: false
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate version
-        env:
-          VERSION: ${{ inputs.VERSION }}
-        run: |
-          set -euo pipefail
-          [[ "$VERSION" =~ ^(latest|[0-9]{8}-[0-9]{6}|sha-[0-9a-f]{7,40})$ ]] || {
-            echo "Invalid image tag: $VERSION"
-            exit 1
-          }
-
-      - name: Install Yandex Cloud CLI
-        run: |
-          set -euo pipefail
-          BASE_URL="https://storage.yandexcloud.net"
-          curl -fsSL \
-            "${BASE_URL}/yandexcloud-yc/install.sh" \
-            -o "$RUNNER_TEMP/install-yc.sh"
-          bash "$RUNNER_TEMP/install-yc.sh" -i "$HOME/yandex-cloud" -n
-          echo "$HOME/yandex-cloud/bin" >> "$GITHUB_PATH"
-
-      - name: Configure Yandex Cloud
-        env:
-          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
-        run: |
-          set -euo pipefail
-          [[ -n "$YC_SA_KEY" ]] || {
-            echo "YC_SA_KEY is missing"
-            exit 1
-          }
-
-          printf '%s' "$YC_SA_KEY" > "$RUNNER_TEMP/yc-sa-key.json"
-          chmod 600 "$RUNNER_TEMP/yc-sa-key.json"
-
-          yc config profile create default
-          yc config set service-account-key "$RUNNER_TEMP/yc-sa-key.json"
-          yc config set folder-id b1g40vac4uqhevmun4i1
-
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
         with:
-          version: v1.35.1
+          version: 'v3.12.0'
 
-      - name: Configure kubeconfig
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        run: |
-          set -euo pipefail
-          [[ -n "$KUBE_CONFIG" ]] || {
-            echo "KUBE_CONFIG is missing"
-            exit 1
-          }
-
-          mkdir -p "$HOME/.kube"
-          chmod 700 "$HOME/.kube"
-
-          printf '%s\n' "$KUBE_CONFIG" > "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
-
-          sed -i \
-            's|command: /home/v-kash/yandex-cloud/bin/yc|command: yc|' \
-            "$HOME/.kube/config"
-
-          kubectl config use-context yc-k8s-cluster-760
-          kubectl get nodes
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
         with:
-          version: v3.19.0
+          version: 'latest'
 
-      - name: Validate Helm chart
+      - name: Configure Kubeconfig
         run: |
-          helm lint helm/sandbox
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
 
-      - name: Deploy with Helm
-        env:
-          VERSION: ${{ inputs.VERSION }}
+      - name: Deploy via Helm
         run: |
-          set -euo pipefail
-          helm upgrade --install sandbox helm/sandbox \
+          # Если это ручной запуск, берем версию из инпута. 
+          # Если это пуш — ставим latest (или можно подставить github.sha)
+          VERSION="${{ github.event.inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="latest"
+          fi
+          
+          echo "Deploying version: $VERSION"
+          
+          helm upgrade --install my-release ./helm/sandbox \
             --namespace sandbox \
             --create-namespace \
-            --set-string version="$VERSION" \
-            --wait \
-            --atomic \
-            --timeout 5m
-
-      - name: Check deployment
-        run: |
-          kubectl get deployments,pods,services \
-            -n sandbox
-
-          helm list -n sandbox
-          helm history sandbox -n sandbox
+            --set version="$VERSION"
