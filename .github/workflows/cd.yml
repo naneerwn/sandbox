@@ -1,53 +1,134 @@
-name: CD Pipeline
+name: CD
 
 on:
   push:
-    branches: [ "**" ] # <-- ВОТ ЭТО ДОБАВЛЕНО: запуск при любом пуше в любую ветку
-  workflow_dispatch: # Оставляем для ручного запуска (отката)
+    branches: [ "**" ] # <-- ДОБАВЛЕНО: запуск при пуше в любую ветку
+  workflow_dispatch:
     inputs:
-      version:
-        description: 'Версия для деплоя (тег образа). Оставьте пустым для latest'
+      VERSION:
+        description: 'Версия образа (например, latest, sha-62d60ed или 20261120-070148)'
         required: false
+        default: 'latest'
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: sandbox-helm-lab4
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Helm
-        uses: azure/setup-helm@v3
-        with:
-          version: 'v3.12.0'
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'latest'
-
-      - name: Configure Kubeconfig
+      # Определяем версию: если ручной запуск — берем инпут, если пуш — ставим latest
+      - name: Set Version Variable
+        id: vars
         run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
-
-      - name: Deploy via Helm
-        run: |
-          # Если это ручной запуск, берем версию из инпута. 
-          # Если это пуш — ставим latest (или можно подставить github.sha)
-          VERSION="${{ github.event.inputs.version }}"
-          if [ -z "$VERSION" ]; then
-            VERSION="latest"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "DEPLOY_VERSION=${{ inputs.VERSION }}" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_VERSION=latest" >> $GITHUB_ENV
           fi
-          
-          echo "Deploying version: $VERSION"
-          
-          helm upgrade --install my-release ./helm/sandbox \
+
+      - name: Validate version
+        env:
+          VERSION: ${{ env.DEPLOY_VERSION }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^(latest|[0-9]{8}-[0-9]{6}|sha-[0-9a-f]{7,40})$ ]] || {
+            echo "Invalid image tag: $VERSION"
+            exit 1
+          }
+
+      - name: Install Yandex Cloud CLI
+        run: |
+          set -euo pipefail
+          BASE_URL="https://storage.yandexcloud.net"
+          curl -fsSL \
+            "${BASE_URL}/yandexcloud-yc/install.sh" \
+            -o "$RUNNER_TEMP/install-yc.sh"
+          bash "$RUNNER_TEMP/install-yc.sh" -i "$HOME/yandex-cloud" -n
+          echo "$HOME/yandex-cloud/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Yandex Cloud
+        env:
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$YC_SA_KEY" ]] || {
+            echo "YC_SA_KEY is missing"
+            exit 1
+          }
+
+          printf '%s' "$YC_SA_KEY" > "$RUNNER_TEMP/yc-sa-key.json"
+          chmod 600 "$RUNNER_TEMP/yc-sa-key.json"
+
+          yc config profile create default
+          yc config set service-account-key "$RUNNER_TEMP/yc-sa-key.json"
+          yc config set folder-id b1g40vac4uqhevmun4i1
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.35.1
+
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          [[ -n "$KUBE_CONFIG" ]] || {
+            echo "KUBE_CONFIG is missing"
+            exit 1
+          }
+
+          mkdir -p "$HOME/.kube"
+          chmod 700 "$HOME/.kube"
+
+          # Твой KUBE_CONFIG хранится сырым текстом, поэтому пишем его напрямую
+          printf '%s\n' "$KUBE_CONFIG" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+          # Исправляем путь к yc, чтобы kubectl мог авторизоваться
+          sed -i \
+            's|command: /home/v-kash/yandex-cloud/bin/yc|command: yc|' \
+            "$HOME/.kube/config"
+
+          kubectl config use-context yc-k8s-cluster-760
+          kubectl get nodes
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: Validate Helm chart
+        run: |
+          helm lint helm/sandbox
+
+      - name: Deploy with Helm
+        env:
+          VERSION: ${{ env.DEPLOY_VERSION }}
+        run: |
+          set -euo pipefail
+          helm upgrade --install sandbox helm/sandbox \
             --namespace sandbox \
             --create-namespace \
-            --set version="$VERSION"
+            --set-string version="$VERSION" \
+            --wait \
+            --atomic \
+            --timeout 5m
+
+      - name: Check deployment
+        run: |
+          kubectl get deployments,pods,services \
+            -n sandbox
+
+          helm list -n sandbox
+          helm history sandbox -n sandbox
